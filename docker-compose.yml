@@ -1,0 +1,9 @@
+services:
+  instinto-puro-bot:
+    build: .
+    container_name: instinto-puro-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
