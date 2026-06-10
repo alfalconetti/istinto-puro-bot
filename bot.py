@@ -104,8 +104,6 @@ async def start_hand(game: Game, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown",
         )
         await asyncio.sleep(15)
-        # Controlla che la partita esista ancora e sia nello stesso stato
-        # (potrebbe essere stata cancellata nel frattempo)
         current = get_game(game.chat_id)
         if current and current.state == GameState.WAITING_ANSWER:
             await send_judging(game, context)
@@ -120,7 +118,7 @@ async def start_hand(game: Game, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(
             chat_id=game.chat_id,
             text=f"📝 {p1.username} e {p2.username}: scrivete ognuno una squadra!\n\n"
-                 f"(Prima uno, poi l'altro)",
+                 f"(Prima uno, poi l'altro — hai 3 secondi per la seconda!)",
         )
 
 
@@ -150,7 +148,6 @@ async def send_judging(game: Game, context: ContextTypes.DEFAULT_TYPE):
 async def assign_point(game: Game, context: ContextTypes.DEFAULT_TYPE, winner_id: int | None):
     await safe_delete(context, game.chat_id, game.judging_msg_id)
 
-    # Salva la mano nel DB
     if game.db_id:
         db.save_hand(game.db_id, game.hand_num, game.team_a, game.team_b, winner_id)
 
@@ -182,10 +179,10 @@ async def end_game(game: Game, context: ContextTypes.DEFAULT_TYPE, winner: Playe
     db.save_game(game)
     db.add_win(game.chat_id, winner.user_id, winner.username)
 
-    lb = db.get_leaderboard(game.chat_id)
+    lb = db.get_leaderboard_with_winpct(game.chat_id)
     lb_text = "\n".join(
         f"{'🥇' if i == 0 else '🥈' if i == 1 else '🥉' if i == 2 else '▫️'} "
-        f"{r['username']}: {r['wins']} vitt."
+        f"{r['username']}: {r['win_pct']:.0f}% ({r['wins']} vitt. su {r['played']})"
         for i, r in enumerate(lb)
     )
 
@@ -211,21 +208,45 @@ async def cmd_newgame(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     target_score = 3
-    auto_teams   = True
-
     for arg in (context.args or []):
         if arg.isdigit():
             target_score = max(1, int(arg))
-        elif arg.lower() == "manual":
-            auto_teams = False
-        elif arg.lower() == "auto":
-            auto_teams = True
+
+    # Salva target_score nel context per usarlo dopo nella callback
+    context.chat_data["pending_target_score"] = target_score
+
+    kb = [
+        [
+            InlineKeyboardButton("🎲 Automatiche", callback_data="mode_auto"),
+            InlineKeyboardButton("✍️ Manuali",     callback_data="mode_manual"),
+        ]
+    ]
+    await update.message.reply_text(
+        f"🆕 *Nuova partita — Istinto Puro!*\n\n"
+        f"🏆 Punti per vincere: *{target_score}*\n\n"
+        f"Come vengono scelte le squadre?",
+        reply_markup=InlineKeyboardMarkup(kb),
+        parse_mode="Markdown",
+    )
+
+
+async def cb_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query   = update.callback_query
+    await query.answer()
+    chat_id = query.message.chat_id
+
+    if get_game(chat_id):
+        await query.edit_message_text("⚠️ C'è già una partita in corso!")
+        return
+
+    auto_teams   = query.data == "mode_auto"
+    target_score = context.chat_data.get("pending_target_score", 3)
 
     game = create_game(chat_id, target_score, auto_teams)
 
     mode_label = "🎲 Squadre automatiche" if auto_teams else "✍️ Squadre scelte dai giocatori"
     kb = [[InlineKeyboardButton("⚽ Unisciti!", callback_data="join")]]
-    msg = await update.message.reply_text(
+    msg = await query.edit_message_text(
         f"🆕 *Nuova partita — Istinto Puro!*\n\n"
         f"🏆 Punti per vincere: *{target_score}*\n"
         f"{mode_label}\n\n"
@@ -233,7 +254,7 @@ async def cmd_newgame(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(kb),
         parse_mode="Markdown",
     )
-    game.lobby_msg_id = msg.message_id
+    game.lobby_msg_id = query.message.message_id
 
 
 async def cmd_cancelgame(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -251,18 +272,11 @@ async def cmd_cancelgame(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_resumegame(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
 
-    #if get_game(chat_id):
-    #   await update.message.reply_text(
-    #       "⚠️ C'è già una partita attiva in memoria. Usa /cancelgame prima se vuoi ricominciare."
-    #    )
-    #   return
-
     row = db.load_active_game(chat_id)
     if not row:
         await update.message.reply_text("Nessuna partita da riprendere per questo gruppo.")
         return
 
-    # Ricostruisce l'oggetto Game dal DB
     p1 = Player(user_id=row["player1_id"], username=row["player1_name"], score=row["score1"])
     p2 = Player(user_id=row["player2_id"], username=row["player2_name"], score=row["score2"])
 
@@ -273,7 +287,6 @@ async def cmd_resumegame(update: Update, context: ContextTypes.DEFAULT_TYPE):
         players=[p1, p2],
         db_id=row["id"],
     )
-    # Calcola hand_num dal numero di mani già giocate
     with db.get_conn() as conn:
         count = conn.execute(
             "SELECT COUNT(*) as c FROM hands WHERE game_id=?", (row["id"],)
@@ -295,14 +308,14 @@ async def cmd_resumegame(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    lb = db.get_leaderboard(chat_id)
+    lb = db.get_leaderboard_with_winpct(chat_id)
     if not lb:
         await update.message.reply_text("Nessuna statistica ancora per questo gruppo.")
         return
     text = "📊 *Classifica del gruppo:*\n\n"
     for i, r in enumerate(lb):
         emoji = "🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else "▫️"
-        text += f"{emoji} {r['username']}: {r['wins']} vitt.\n"
+        text += f"{emoji} {r['username']}: {r['win_pct']:.0f}% ({r['wins']} vitt. su {r['played']})\n"
     await update.message.reply_text(text, parse_mode="Markdown")
 
 
@@ -364,10 +377,8 @@ async def cb_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
     game.players.append(Player(user_id=user.id, username=user.first_name))
 
     if game.is_full:
-        # Salva la partita nel DB ora che abbiamo entrambi i giocatori
         game.db_id = db.save_game(game)
         game.hand_num = 1
-
         await safe_delete(context, chat_id, game.lobby_msg_id)
         p1, p2 = game.players
         await context.bot.send_message(
@@ -458,21 +469,32 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_player(game, update.effective_user.id):
         return
 
-    text = update.message.text.strip()
+    text    = update.message.text.strip()
+    user_id = update.effective_user.id
+    username = update.effective_user.first_name
 
     if not game.team_a:
         game.team_a       = text
-        game.team_a_owner = update.effective_user.first_name
+        game.team_a_owner = username
         await update.message.reply_text(
-            f"✅ Prima squadra: *{text}*\nOra l'altro giocatore scriva la sua!",
+            f"✅ Prima squadra: *{text}*\n{username} ha 3 secondi per scrivere la sua!",
             parse_mode="Markdown",
         )
+
+        await asyncio.sleep(3)
+        current = get_game(chat_id)
+        if current and current.state == GameState.WAITING_ANSWER and not current.team_b:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="⏱ Tempo scaduto! Mano saltata.",
+            )
+            await assign_point(game, context, winner_id=None)
+
     elif not game.team_b:
-        # Solo l'altro giocatore può scrivere la seconda squadra
         owner_id = next(
             p.user_id for p in game.players if p.username == game.team_a_owner
         )
-        if update.effective_user.id == owner_id:
+        if user_id == owner_id:
             await update.message.reply_text("Aspetta che l'altro giocatore scriva la sua squadra!")
             return
 
@@ -504,13 +526,14 @@ def main():
     app.add_handler(CommandHandler("delteam",    cmd_delteam))
     app.add_handler(CommandHandler("listteams",  cmd_listteams))
 
+    app.add_handler(CallbackQueryHandler(cb_mode,  pattern="^mode_"))
     app.add_handler(CallbackQueryHandler(cb_join,  pattern="^join$"))
     app.add_handler(CallbackQueryHandler(cb_ready, pattern="^ready$"))
     app.add_handler(CallbackQueryHandler(cb_point, pattern="^point_"))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    logger.info("Instinto Puro bot avviato.")
+    logger.info("Istinto Puro bot avviato.")
     app.run_polling(drop_pending_updates=True)
 
 

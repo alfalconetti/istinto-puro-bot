@@ -1,7 +1,7 @@
 import sqlite3
 import os
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -17,12 +17,9 @@ def get_conn():
 
 
 def _migrate(conn: sqlite3.Connection):
-    """Migrazioni incrementali dello schema."""
-
-    # Migration 1: stats senza group_id → ricrea con group_id
+    # Migration 1: stats senza group_id
     cols = [r[1] for r in conn.execute("PRAGMA table_info(stats)").fetchall()]
     if cols and "group_id" not in cols:
-        # Salva i dati vecchi (user_id, username, wins) con group_id=0 come placeholder
         conn.executescript("""
             ALTER TABLE stats RENAME TO stats_old;
 
@@ -39,19 +36,17 @@ def _migrate(conn: sqlite3.Connection):
 
             DROP TABLE stats_old;
         """)
-        logger.info("Migration completata: stats aggiornata con group_id (righe vecchie → group_id=0)")
+        logger.info("Migration: stats aggiornata con group_id")
 
 
 def init_db():
     with get_conn() as conn:
-        # Crea prima le tabelle, poi migra
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS teams (
                 id   INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT UNIQUE NOT NULL COLLATE NOCASE
             );
 
-            -- Una partita per gruppo, group_id = chat_id Telegram
             CREATE TABLE IF NOT EXISTS games (
                 id           INTEGER PRIMARY KEY AUTOINCREMENT,
                 group_id     INTEGER NOT NULL,
@@ -60,7 +55,7 @@ def init_db():
                 player2_id   INTEGER NOT NULL,
                 player2_name TEXT    NOT NULL,
                 target_score INTEGER NOT NULL DEFAULT 3,
-                auto_teams   INTEGER NOT NULL DEFAULT 1,  -- 1=auto, 0=manual
+                auto_teams   INTEGER NOT NULL DEFAULT 1,
                 state        TEXT    NOT NULL DEFAULT 'LOBBY',
                 score1       INTEGER NOT NULL DEFAULT 0,
                 score2       INTEGER NOT NULL DEFAULT 0,
@@ -68,24 +63,31 @@ def init_db():
                 ended_at     TEXT
             );
 
-            -- Storico mani
             CREATE TABLE IF NOT EXISTS hands (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
                 game_id    INTEGER NOT NULL REFERENCES games(id),
                 hand_num   INTEGER NOT NULL,
                 team_a     TEXT    NOT NULL,
                 team_b     TEXT    NOT NULL,
-                winner_id  INTEGER,           -- NULL = skip/nessuno
+                winner_id  INTEGER,
                 played_at  TEXT    NOT NULL
             );
 
-            -- Statistiche vittorie per gruppo
             CREATE TABLE IF NOT EXISTS stats (
                 group_id INTEGER NOT NULL,
                 user_id  INTEGER NOT NULL,
                 username TEXT    NOT NULL,
                 wins     INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (group_id, user_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS invite_codes (
+                code        TEXT    PRIMARY KEY,
+                creator_id  INTEGER NOT NULL,
+                target_score INTEGER NOT NULL DEFAULT 3,
+                auto_teams  INTEGER NOT NULL DEFAULT 1,
+                created_at  TEXT    NOT NULL,
+                expires_at  TEXT    NOT NULL
             );
         """)
         _migrate(conn)
@@ -129,7 +131,6 @@ def get_two_random_teams() -> tuple[str, str] | None:
 # ── Games ──────────────────────────────────────────────────────────────────
 
 def save_game(game) -> int:
-    """Inserisce o aggiorna la partita. Ritorna l'id del record."""
     now = datetime.utcnow().isoformat()
     p1, p2 = game.players
     with get_conn() as conn:
@@ -174,11 +175,10 @@ def save_hand(game_id: int, hand_num: int, team_a: str, team_b: str, winner_id: 
 
 
 def load_active_game(group_id: int) -> sqlite3.Row | None:
-    """Carica l'ultima partita non terminata per il gruppo."""
     with get_conn() as conn:
         return conn.execute("""
             SELECT * FROM games
-            WHERE group_id = ? AND state NOT IN ('GAME_OVER')
+            WHERE group_id = ? AND state NOT IN ('GAME_OVER', 'CANCELLED')
             ORDER BY id DESC LIMIT 1
         """, (group_id,)).fetchone()
 
@@ -211,3 +211,115 @@ def get_leaderboard(group_id: int) -> list[sqlite3.Row]:
             WHERE group_id = ?
             ORDER BY wins DESC
         """, (group_id,)).fetchall()
+
+
+# ── Invite codes ───────────────────────────────────────────────────────────
+
+INVITE_TTL_MINUTES = 15
+
+
+def save_invite_code(code: str, creator_id: int, target_score: int, auto_teams: bool):
+    now = datetime.utcnow()
+    expires = now + timedelta(minutes=INVITE_TTL_MINUTES)
+    with get_conn() as conn:
+        conn.execute("""
+            INSERT OR REPLACE INTO invite_codes
+                (code, creator_id, target_score, auto_teams, created_at, expires_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            code, creator_id, target_score,
+            1 if auto_teams else 0,
+            now.isoformat(), expires.isoformat(),
+        ))
+
+
+def get_invite_code(code: str) -> sqlite3.Row | None:
+    cleanup_expired_codes()
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM invite_codes WHERE code = ?", (code.upper(),)
+        ).fetchone()
+
+
+def delete_invite_code(code: str):
+    with get_conn() as conn:
+        conn.execute("DELETE FROM invite_codes WHERE code = ?", (code.upper(),))
+
+
+def cleanup_expired_codes():
+    now = datetime.utcnow().isoformat()
+    with get_conn() as conn:
+        conn.execute("DELETE FROM invite_codes WHERE expires_at < ?", (now,))
+
+
+# ── Win% stats ─────────────────────────────────────────────────────────────
+
+def get_games_played(group_id: int, user_id: int) -> int:
+    """Conta le partite completate (GAME_OVER) in cui l'utente era player1 o player2."""
+    with get_conn() as conn:
+        row = conn.execute("""
+            SELECT COUNT(*) as c FROM games
+            WHERE group_id = ?
+              AND state = 'GAME_OVER'
+              AND (player1_id = ? OR player2_id = ?)
+        """, (group_id, user_id, user_id)).fetchone()
+    return row["c"] if row else 0
+
+
+def get_leaderboard_with_winpct(group_id: int) -> list[dict]:
+    """
+    Restituisce la classifica ordinata per win%, poi win assolute come tiebreaker.
+    Ogni elemento: {username, wins, played, win_pct}
+    """
+    with get_conn() as conn:
+        stats = conn.execute("""
+            SELECT user_id, username, wins FROM stats
+            WHERE group_id = ?
+        """, (group_id,)).fetchall()
+
+    result = []
+    for s in stats:
+        played = get_games_played(group_id, s["user_id"])
+        win_pct = (s["wins"] / played * 100) if played > 0 else 0.0
+        result.append({
+            "username": s["username"],
+            "wins":     s["wins"],
+            "played":   played,
+            "win_pct":  win_pct,
+        })
+
+    result.sort(key=lambda x: (x["win_pct"], x["wins"]), reverse=True)
+    return result
+
+
+def get_games_played(group_id: int, user_id: int) -> int:
+    with get_conn() as conn:
+        row = conn.execute("""
+            SELECT COUNT(*) as c FROM games
+            WHERE group_id = ?
+              AND state = 'GAME_OVER'
+              AND (player1_id = ? OR player2_id = ?)
+        """, (group_id, user_id, user_id)).fetchone()
+    return row["c"] if row else 0
+
+
+def get_leaderboard_with_winpct(group_id: int) -> list[dict]:
+    with get_conn() as conn:
+        stats = conn.execute("""
+            SELECT user_id, username, wins FROM stats
+            WHERE group_id = ?
+        """, (group_id,)).fetchall()
+
+    result = []
+    for s in stats:
+        played = get_games_played(group_id, s["user_id"])
+        win_pct = (s["wins"] / played * 100) if played > 0 else 0.0
+        result.append({
+            "username": s["username"],
+            "wins":     s["wins"],
+            "played":   played,
+            "win_pct":  win_pct,
+        })
+
+    result.sort(key=lambda x: (x["win_pct"], x["wins"]), reverse=True)
+    return result
