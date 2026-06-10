@@ -36,15 +36,28 @@ def _migrate(conn: sqlite3.Connection):
 
             DROP TABLE stats_old;
         """)
-        logger.info("Migration: stats aggiornata con group_id")
+        logger.info("Migration 1: stats aggiornata con group_id")
+
+    # Migration 2: colonna league su teams
+    team_cols = [r[1] for r in conn.execute("PRAGMA table_info(teams)").fetchall()]
+    if team_cols and "league" not in team_cols:
+        conn.execute("ALTER TABLE teams ADD COLUMN league TEXT")
+        logger.info("Migration 2: teams aggiornata con colonna league")
+
+    # Migration 3: colonna league su group_team_overrides
+    ov_cols = [r[1] for r in conn.execute("PRAGMA table_info(group_team_overrides)").fetchall()]
+    if ov_cols and "league" not in ov_cols:
+        conn.execute("ALTER TABLE group_team_overrides ADD COLUMN league TEXT")
+        logger.info("Migration 3: group_team_overrides aggiornata con colonna league")
 
 
 def init_db():
     with get_conn() as conn:
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS teams (
-                id   INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT UNIQUE NOT NULL COLLATE NOCASE
+                id     INTEGER PRIMARY KEY AUTOINCREMENT,
+                name   TEXT UNIQUE NOT NULL COLLATE NOCASE,
+                league TEXT
             );
 
             CREATE TABLE IF NOT EXISTS games (
@@ -81,30 +94,33 @@ def init_db():
                 PRIMARY KEY (group_id, user_id)
             );
 
-            CREATE TABLE IF NOT EXISTS invite_codes (
-                code        TEXT    PRIMARY KEY,
-                creator_id  INTEGER NOT NULL,
-                target_score INTEGER NOT NULL DEFAULT 3,
-                auto_teams  INTEGER NOT NULL DEFAULT 1,
-                created_at  TEXT    NOT NULL,
-                expires_at  TEXT    NOT NULL
+            -- Sovrascritture per-gruppo: action = 'add' o 'exclude'
+            CREATE TABLE IF NOT EXISTS group_team_overrides (
+                group_id  INTEGER NOT NULL,
+                team_name TEXT    NOT NULL COLLATE NOCASE,
+                action    TEXT    NOT NULL CHECK(action IN ('add', 'exclude')),
+                league    TEXT,
+                PRIMARY KEY (group_id, team_name)
             );
         """)
         _migrate(conn)
 
 
-# ── Teams ──────────────────────────────────────────────────────────────────
+# ── Teams (globali, solo ADMIN_ID) ────────────────────────────────────────
 
-def add_team(name: str) -> bool:
+def admin_add_team(name: str, league: str | None = None) -> bool:
     try:
         with get_conn() as conn:
-            conn.execute("INSERT INTO teams (name) VALUES (?)", (name.strip(),))
+            conn.execute(
+                "INSERT INTO teams (name, league) VALUES (?, ?)",
+                (name.strip(), league)
+            )
         return True
     except sqlite3.IntegrityError:
         return False
 
 
-def del_team(name: str) -> bool:
+def admin_del_team(name: str) -> bool:
     with get_conn() as conn:
         cur = conn.execute(
             "DELETE FROM teams WHERE name = ? COLLATE NOCASE", (name.strip(),)
@@ -112,20 +128,111 @@ def del_team(name: str) -> bool:
         return cur.rowcount > 0
 
 
-def get_all_teams() -> list[str]:
+def admin_get_all_teams() -> list[sqlite3.Row]:
     with get_conn() as conn:
-        rows = conn.execute("SELECT name FROM teams ORDER BY name").fetchall()
-    return [r["name"] for r in rows]
+        return conn.execute(
+            "SELECT name, league FROM teams ORDER BY league, name"
+        ).fetchall()
 
 
-def get_two_random_teams() -> tuple[str, str] | None:
+# ── Team overrides per gruppo ─────────────────────────────────────────────
+
+def get_leagues() -> list[str]:
+    """Restituisce le league distinte presenti nel DB, ordinate."""
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT name FROM teams ORDER BY RANDOM() LIMIT 2"
+            "SELECT DISTINCT league FROM teams WHERE league IS NOT NULL ORDER BY league"
         ).fetchall()
-    if len(rows) < 2:
+    return [r["league"] for r in rows]
+
+
+def group_add_team(group_id: int, name: str, league: str | None = None) -> bool:
+    """Aggiunge una squadra extra per il gruppo."""
+    try:
+        with get_conn() as conn:
+            conn.execute("""
+                INSERT INTO group_team_overrides (group_id, team_name, action, league)
+                VALUES (?, ?, 'add', ?)
+                ON CONFLICT(group_id, team_name) DO UPDATE SET action = 'add', league = excluded.league
+            """, (group_id, name.strip(), league))
+        return True
+    except sqlite3.IntegrityError:
+        return False
+
+
+def group_exclude_team(group_id: int, name: str) -> bool:
+    """Esclude una squadra globale per il gruppo."""
+    with get_conn() as conn:
+        # Controlla che la squadra esista globalmente o come add locale
+        exists_global = conn.execute(
+            "SELECT 1 FROM teams WHERE name = ? COLLATE NOCASE", (name.strip(),)
+        ).fetchone()
+        exists_local = conn.execute("""
+            SELECT 1 FROM group_team_overrides
+            WHERE group_id = ? AND team_name = ? COLLATE NOCASE AND action = 'add'
+        """, (group_id, name.strip())).fetchone()
+
+        if not exists_global and not exists_local:
+            return False
+
+        conn.execute("""
+            INSERT INTO group_team_overrides (group_id, team_name, action)
+            VALUES (?, ?, 'exclude')
+            ON CONFLICT(group_id, team_name) DO UPDATE SET action = 'exclude'
+        """, (group_id, name.strip()))
+        return True
+
+
+def group_restore_team(group_id: int, name: str) -> bool:
+    """Rimuove l'override per il gruppo (ripristina comportamento globale)."""
+    with get_conn() as conn:
+        cur = conn.execute("""
+            DELETE FROM group_team_overrides
+            WHERE group_id = ? AND team_name = ? COLLATE NOCASE
+        """, (group_id, name.strip()))
+        return cur.rowcount > 0
+
+
+def group_get_team_list(group_id: int) -> dict:
+    """
+    Ritorna il pool effettivo di squadre per il gruppo.
+    {name: league} — globali - exclude + add locali.
+    """
+    with get_conn() as conn:
+        globals_ = conn.execute(
+            "SELECT name, league FROM teams"
+        ).fetchall()
+        overrides = conn.execute("""
+            SELECT team_name, action, league FROM group_team_overrides
+            WHERE group_id = ?
+        """, (group_id,)).fetchall()
+
+    excludes = {r["team_name"].lower() for r in overrides if r["action"] == "exclude"}
+    adds     = {r["team_name"]: r["league"] for r in overrides if r["action"] == "add"}
+
+    pool = {r["name"]: r["league"] for r in globals_ if r["name"].lower() not in excludes}
+    for name, league in adds.items():
+        if name.lower() not in {k.lower() for k in pool}:
+            pool[name] = league
+
+    return pool
+
+
+def get_two_random_teams(group_id: int) -> tuple[str, str] | None:
+    pool = list(group_get_team_list(group_id).keys())
+    if len(pool) < 2:
         return None
-    return rows[0]["name"], rows[1]["name"]
+    import random
+    random.shuffle(pool)
+    return pool[0], pool[1]
+
+
+def group_list_overrides(group_id: int) -> list[sqlite3.Row]:
+    with get_conn() as conn:
+        return conn.execute("""
+            SELECT team_name, action FROM group_team_overrides
+            WHERE group_id = ? ORDER BY action, team_name
+        """, (group_id,)).fetchall()
 
 
 # ── Games ──────────────────────────────────────────────────────────────────
@@ -204,94 +311,6 @@ def add_win(group_id: int, user_id: int, username: str):
         """, (group_id, user_id, username))
 
 
-def get_leaderboard(group_id: int) -> list[sqlite3.Row]:
-    with get_conn() as conn:
-        return conn.execute("""
-            SELECT username, wins FROM stats
-            WHERE group_id = ?
-            ORDER BY wins DESC
-        """, (group_id,)).fetchall()
-
-
-# ── Invite codes ───────────────────────────────────────────────────────────
-
-INVITE_TTL_MINUTES = 15
-
-
-def save_invite_code(code: str, creator_id: int, target_score: int, auto_teams: bool):
-    now = datetime.utcnow()
-    expires = now + timedelta(minutes=INVITE_TTL_MINUTES)
-    with get_conn() as conn:
-        conn.execute("""
-            INSERT OR REPLACE INTO invite_codes
-                (code, creator_id, target_score, auto_teams, created_at, expires_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (
-            code, creator_id, target_score,
-            1 if auto_teams else 0,
-            now.isoformat(), expires.isoformat(),
-        ))
-
-
-def get_invite_code(code: str) -> sqlite3.Row | None:
-    cleanup_expired_codes()
-    with get_conn() as conn:
-        return conn.execute(
-            "SELECT * FROM invite_codes WHERE code = ?", (code.upper(),)
-        ).fetchone()
-
-
-def delete_invite_code(code: str):
-    with get_conn() as conn:
-        conn.execute("DELETE FROM invite_codes WHERE code = ?", (code.upper(),))
-
-
-def cleanup_expired_codes():
-    now = datetime.utcnow().isoformat()
-    with get_conn() as conn:
-        conn.execute("DELETE FROM invite_codes WHERE expires_at < ?", (now,))
-
-
-# ── Win% stats ─────────────────────────────────────────────────────────────
-
-def get_games_played(group_id: int, user_id: int) -> int:
-    """Conta le partite completate (GAME_OVER) in cui l'utente era player1 o player2."""
-    with get_conn() as conn:
-        row = conn.execute("""
-            SELECT COUNT(*) as c FROM games
-            WHERE group_id = ?
-              AND state = 'GAME_OVER'
-              AND (player1_id = ? OR player2_id = ?)
-        """, (group_id, user_id, user_id)).fetchone()
-    return row["c"] if row else 0
-
-
-def get_leaderboard_with_winpct(group_id: int) -> list[dict]:
-    """
-    Restituisce la classifica ordinata per win%, poi win assolute come tiebreaker.
-    Ogni elemento: {username, wins, played, win_pct}
-    """
-    with get_conn() as conn:
-        stats = conn.execute("""
-            SELECT user_id, username, wins FROM stats
-            WHERE group_id = ?
-        """, (group_id,)).fetchall()
-
-    result = []
-    for s in stats:
-        played = get_games_played(group_id, s["user_id"])
-        win_pct = (s["wins"] / played * 100) if played > 0 else 0.0
-        result.append({
-            "username": s["username"],
-            "wins":     s["wins"],
-            "played":   played,
-            "win_pct":  win_pct,
-        })
-
-    result.sort(key=lambda x: (x["win_pct"], x["wins"]), reverse=True)
-    return result
-
-
 def get_games_played(group_id: int, user_id: int) -> int:
     with get_conn() as conn:
         row = conn.execute("""
@@ -312,7 +331,7 @@ def get_leaderboard_with_winpct(group_id: int) -> list[dict]:
 
     result = []
     for s in stats:
-        played = get_games_played(group_id, s["user_id"])
+        played  = get_games_played(group_id, s["user_id"])
         win_pct = (s["wins"] / played * 100) if played > 0 else 0.0
         result.append({
             "username": s["username"],

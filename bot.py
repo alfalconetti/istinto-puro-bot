@@ -12,6 +12,7 @@ from telegram.ext import (
     filters,
 )
 from telegram.error import BadRequest
+from telegram.constants import ChatType
 
 import database as db
 from game import (
@@ -42,6 +43,18 @@ async def safe_delete(context: ContextTypes.DEFAULT_TYPE, chat_id: int, msg_id: 
         await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
     except BadRequest:
         pass
+
+
+async def is_group_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    user_id = update.effective_user.id
+    if user_id == ADMIN_ID:
+        return True
+    chat_id = update.effective_chat.id
+    try:
+        member = await context.bot.get_chat_member(chat_id, user_id)
+        return member.status in ("administrator", "creator")
+    except Exception:
+        return False
 
 
 # ── Game flow ──────────────────────────────────────────────────────────────
@@ -83,7 +96,7 @@ async def start_countdown(game: Game, context: ContextTypes.DEFAULT_TYPE):
 
 async def start_hand(game: Game, context: ContextTypes.DEFAULT_TYPE):
     if game.auto_teams:
-        pair = db.get_two_random_teams()
+        pair = db.get_two_random_teams(game.chat_id)
         if pair is None:
             await context.bot.send_message(
                 chat_id=game.chat_id,
@@ -212,7 +225,6 @@ async def cmd_newgame(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if arg.isdigit():
             target_score = max(1, int(arg))
 
-    # Salva target_score nel context per usarlo dopo nella callback
     context.chat_data["pending_target_score"] = target_score
 
     kb = [
@@ -241,12 +253,11 @@ async def cb_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     auto_teams   = query.data == "mode_auto"
     target_score = context.chat_data.get("pending_target_score", 3)
-
     game = create_game(chat_id, target_score, auto_teams)
 
     mode_label = "🎲 Squadre automatiche" if auto_teams else "✍️ Squadre scelte dai giocatori"
     kb = [[InlineKeyboardButton("⚽ Unisciti!", callback_data="join")]]
-    msg = await query.edit_message_text(
+    await query.edit_message_text(
         f"🆕 *Nuova partita — Istinto Puro!*\n\n"
         f"🏆 Punti per vincere: *{target_score}*\n"
         f"{mode_label}\n\n"
@@ -319,40 +330,138 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode="Markdown")
 
 
+# ── Comandi squadre per gruppo (admin Telegram) ────────────────────────────
+
 async def cmd_addteam(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
+    if not await is_group_admin(update, context):
         return
     if not context.args:
         await update.message.reply_text("Uso: /addteam <nome squadra>")
         return
-    name = " ".join(context.args)
-    if db.add_team(name):
-        await update.message.reply_text(f"✅ Squadra aggiunta: *{name}*", parse_mode="Markdown")
-    else:
-        await update.message.reply_text(f"⚠️ *{name}* è già nel database.", parse_mode="Markdown")
+    name    = " ".join(context.args)
+    chat_id = update.effective_chat.id
+
+    leagues = db.get_leagues()
+    if not leagues:
+        # Nessuna league nel DB, aggiungi direttamente senza league
+        db.group_add_team(chat_id, name)
+        await update.message.reply_text(
+            f"✅ Aggiunta per questo gruppo: *{name}*", parse_mode="Markdown"
+        )
+        return
+
+    context.chat_data["pending_addteam"] = name
+    kb = [
+        [InlineKeyboardButton(league, callback_data=f"addteam_league_{league}")]
+        for league in leagues
+    ]
+    kb.append([InlineKeyboardButton("— Nessuna", callback_data="addteam_league_none")])
+    await update.message.reply_text(
+        f"➕ Aggiunta *{name}* — scegli il campionato:",
+        reply_markup=InlineKeyboardMarkup(kb),
+        parse_mode="Markdown",
+    )
+
+
+async def cb_addteam_league(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query   = update.callback_query
+    await query.answer()
+    chat_id = query.message.chat_id
+
+    name = context.chat_data.get("pending_addteam")
+    if not name:
+        await query.edit_message_text("❌ Operazione scaduta, riusa /addteam.")
+        return
+
+    league = None if query.data == "addteam_league_none" else query.data.removeprefix("addteam_league_")
+    db.group_add_team(chat_id, name, league)
+    context.chat_data.pop("pending_addteam", None)
+
+    league_str = f" ({league})" if league else ""
+    await query.edit_message_text(
+        f"✅ Aggiunta per questo gruppo: *{name}*{league_str}", parse_mode="Markdown"
+    )
 
 
 async def cmd_delteam(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
+    if not await is_group_admin(update, context):
         return
     if not context.args:
         await update.message.reply_text("Uso: /delteam <nome squadra>")
         return
-    name = " ".join(context.args)
-    if db.del_team(name):
-        await update.message.reply_text(f"🗑 Squadra rimossa: *{name}*", parse_mode="Markdown")
+    name    = " ".join(context.args)
+    chat_id = update.effective_chat.id
+    if db.group_exclude_team(chat_id, name):
+        await update.message.reply_text(f"🚫 Esclusa per questo gruppo: *{name}*", parse_mode="Markdown")
     else:
         await update.message.reply_text(f"❌ Squadra non trovata: *{name}*", parse_mode="Markdown")
 
 
 async def cmd_listteams(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_group_admin(update, context):
+        return
+    chat_id  = update.effective_chat.id
+    pool     = db.group_get_team_list(chat_id)
+    overrides = db.group_list_overrides(chat_id)
+
+    text = f"🏟 *Squadre attive per questo gruppo:* {len(pool)}\n"
+    if overrides:
+        text += "\n*Modifiche rispetto al globale:*\n"
+        for r in overrides:
+            icon = "➕" if r["action"] == "add" else "🚫"
+            text += f"{icon} {r['team_name']}\n"
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+
+# ── Comandi squadre globali (solo ADMIN_ID) ────────────────────────────────
+
+async def cmd_adminaddteam(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
-    teams = db.get_all_teams()
+    if not context.args:
+        await update.message.reply_text("Uso: /adminaddteam <nome> [league]")
+        return
+    # Supporta: /adminaddteam Juventus Serie A
+    parts  = " ".join(context.args).split("|")
+    name   = parts[0].strip()
+    league = parts[1].strip() if len(parts) > 1 else None
+    if db.admin_add_team(name, league):
+        league_str = f" ({league})" if league else ""
+        await update.message.reply_text(
+            f"✅ Squadra globale aggiunta: *{name}*{league_str}", parse_mode="Markdown"
+        )
+    else:
+        await update.message.reply_text(f"⚠️ *{name}* è già nel database.", parse_mode="Markdown")
+
+
+async def cmd_admindelteam(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    if not context.args:
+        await update.message.reply_text("Uso: /admindelteam <nome squadra>")
+        return
+    name = " ".join(context.args)
+    if db.admin_del_team(name):
+        await update.message.reply_text(f"🗑 Squadra globale rimossa: *{name}*", parse_mode="Markdown")
+    else:
+        await update.message.reply_text(f"❌ Squadra non trovata: *{name}*", parse_mode="Markdown")
+
+
+async def cmd_adminlistteams(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    teams = db.admin_get_all_teams()
     if not teams:
         await update.message.reply_text("Nessuna squadra nel database.")
         return
-    text = "🏟 *Squadre nel database:*\n\n" + "\n".join(f"• {t}" for t in teams)
+    # Raggruppa per league
+    by_league: dict[str, list[str]] = {}
+    for t in teams:
+        league = t["league"] or "—"
+        by_league.setdefault(league, []).append(t["name"])
+    text = "🏟 *Squadre globali:*\n\n"
+    for league, names in sorted(by_league.items()):
+        text += f"*{league}*\n" + "\n".join(f"• {n}" for n in names) + "\n\n"
     await update.message.reply_text(text, parse_mode="Markdown")
 
 
@@ -417,7 +526,6 @@ async def cb_ready(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     game.ready.add(user.id)
-
     p1, p2 = game.players
     kb = [[InlineKeyboardButton("✅ Sono pronto!", callback_data="ready")]]
     try:
@@ -458,42 +566,37 @@ async def cb_point(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await assign_point(game, context, winner_id=winner_id)
 
 
-# ── Message handler (squadre in modalità manual) ───────────────────────────
+# ── Message handler ────────────────────────────────────────────────────────
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    game    = get_game(chat_id)
+    chat_id  = update.effective_chat.id
+    game     = get_game(chat_id)
 
     if not game or game.state != GameState.WAITING_ANSWER or game.auto_teams:
         return
     if not is_player(game, update.effective_user.id):
         return
 
-    text    = update.message.text.strip()
-    user_id = update.effective_user.id
+    text     = update.message.text.strip()
+    user_id  = update.effective_user.id
     username = update.effective_user.first_name
 
     if not game.team_a:
         game.team_a       = text
         game.team_a_owner = username
         await update.message.reply_text(
-            f"✅ Prima squadra: *{text}*\n{username} ha 3 secondi per scrivere la sua!",
+            f"✅ Prima squadra: *{text}*\nL'altro giocatore ha 3 secondi per scrivere la sua!",
             parse_mode="Markdown",
         )
 
         await asyncio.sleep(3)
         current = get_game(chat_id)
         if current and current.state == GameState.WAITING_ANSWER and not current.team_b:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text="⏱ Tempo scaduto! Mano saltata.",
-            )
+            await context.bot.send_message(chat_id=chat_id, text="⏱ Tempo scaduto! Mano saltata.")
             await assign_point(game, context, winner_id=None)
 
     elif not game.team_b:
-        owner_id = next(
-            p.user_id for p in game.players if p.username == game.team_a_owner
-        )
+        owner_id = next(p.user_id for p in game.players if p.username == game.team_a_owner)
         if user_id == owner_id:
             await update.message.reply_text("Aspetta che l'altro giocatore scriva la sua squadra!")
             return
@@ -518,14 +621,22 @@ def main():
 
     app = Application.builder().token(BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("newgame",    cmd_newgame))
-    app.add_handler(CommandHandler("cancelgame", cmd_cancelgame))
-    app.add_handler(CommandHandler("resumegame", cmd_resumegame))
-    app.add_handler(CommandHandler("stats",      cmd_stats))
-    app.add_handler(CommandHandler("addteam",    cmd_addteam))
-    app.add_handler(CommandHandler("delteam",    cmd_delteam))
-    app.add_handler(CommandHandler("listteams",  cmd_listteams))
+    app.add_handler(CommandHandler("newgame",        cmd_newgame))
+    app.add_handler(CommandHandler("cancelgame",     cmd_cancelgame))
+    app.add_handler(CommandHandler("resumegame",     cmd_resumegame))
+    app.add_handler(CommandHandler("stats",          cmd_stats))
 
+    # Per-gruppo (admin Telegram)
+    app.add_handler(CommandHandler("addteam",        cmd_addteam))
+    app.add_handler(CommandHandler("delteam",        cmd_delteam))
+    app.add_handler(CommandHandler("listteams",      cmd_listteams))
+
+    # Globali (solo ADMIN_ID)
+    app.add_handler(CommandHandler("adminaddteam",   cmd_adminaddteam))
+    app.add_handler(CommandHandler("admindelteam",   cmd_admindelteam))
+    app.add_handler(CommandHandler("adminlistteams", cmd_adminlistteams))
+
+    app.add_handler(CallbackQueryHandler(cb_addteam_league, pattern="^addteam_league_"))
     app.add_handler(CallbackQueryHandler(cb_mode,  pattern="^mode_"))
     app.add_handler(CallbackQueryHandler(cb_join,  pattern="^join$"))
     app.add_handler(CallbackQueryHandler(cb_ready, pattern="^ready$"))
