@@ -3,36 +3,42 @@ from enum import Enum, auto
 
 
 class GameState(Enum):
-    LOBBY = auto()
-    READY_CHECK = auto()
-    COUNTDOWN = auto()
+    LOBBY        = auto()
+    READY_CHECK  = auto()
+    COUNTDOWN    = auto()
     WAITING_ANSWER = auto()
-    JUDGING = auto()
-    GAME_OVER = auto()
+    JUDGING      = auto()
+    GAME_OVER    = auto()
 
 
 @dataclass
 class Player:
-    user_id: int
+    user_id:  int
     username: str
-    score: int = 0
+    score:    int = 0
 
 
 @dataclass
 class Game:
-    chat_id: int
+    chat_id:      int
     target_score: int
-    auto_teams: bool
-    players: list[Player] = field(default_factory=list)
-    state: GameState = GameState.LOBBY
-    ready: set[int] = field(default_factory=set)          # user_ids who pressed ready
-    team_a: str = ""
-    team_b: str = ""
-    # message ids for cleanup
-    lobby_msg_id: int | None = None
-    ready_msg_id: int | None = None
-    judging_msg_id: int | None = None
-    countdown_msg_id: int | None = None
+    auto_teams:   bool
+    players:      list[Player]      = field(default_factory=list)
+    state:        GameState         = GameState.LOBBY
+    ready:        set[int]          = field(default_factory=set)
+    team_a:       str               = ""
+    team_b:       str               = ""
+    team_a_owner: str               = ""   # username di chi ha scritto team_a in manual mode
+    hand_num:     int               = 0    # mano corrente (incrementato prima del ready check)
+
+    # DB
+    db_id:        int | None        = None
+
+    # message ids per cleanup
+    lobby_msg_id:    int | None     = None
+    ready_msg_id:    int | None     = None
+    judging_msg_id:  int | None     = None
+    countdown_msg_id: int | None    = None
 
     @property
     def is_full(self) -> bool:
@@ -59,7 +65,7 @@ class Game:
         return f"🏆 {p1.username}: {p1.score}  —  {p2.username}: {p2.score}"
 
 
-# One game per chat
+# Una partita per chat
 _games: dict[int, Game] = {}
 
 
@@ -71,6 +77,11 @@ def create_game(chat_id: int, target_score: int, auto_teams: bool) -> Game:
     g = Game(chat_id=chat_id, target_score=target_score, auto_teams=auto_teams)
     _games[chat_id] = g
     return g
+
+
+def restore_game(chat_id: int, game: Game):
+    """Rimette in memoria una partita ricostruita dal DB."""
+    _games[chat_id] = game
 
 
 def remove_game(chat_id: int):

@@ -1,0 +1,17 @@
+# Env e segreti
+.env
+
+# Dati runtime
+data/
+*.db
+*.db.bak
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+
+# Docker
+*.log

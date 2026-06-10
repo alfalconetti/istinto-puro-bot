@@ -35,7 +35,13 @@ TEAMS = [
     "Reggina",
     "Siena",
     "Chievo",
+    "Piacenza",
     "Venezia",
+    "Modena",
+    "Foggia",
+    "Ascoli",
+    "Vicenza",
+    "Perugia",
     "Empoli",
     "Sassuolo",
     "Monza",
@@ -44,6 +50,8 @@ TEAMS = [
     "Salernitana",
     "Cremonese",
     "Como",
+    "Pistoiese",
+
     # ── Premier League / Inghilterra ──────────────────────────────────────
     "Manchester United",
     "Manchester City",
@@ -56,6 +64,23 @@ TEAMS = [
     "Aston Villa",
     "West Ham",
     "Leicester",
+    "Leeds United",
+    "Blackburn Rovers",
+    "Bolton",
+    "Middlesbrough",
+    "Sunderland",
+    "Fulham",
+    "Southampton",
+    "Wolverhampton",
+    "Crystal Palace",
+    "Nottingham Forest",
+    "Sheffield Wednesday",
+    "Derby County",
+    "Coventry",
+    "Ipswich Town",
+    "Brighton",
+    "Brentford",
+    "West Bromwich Albion",
 
     # ── Spagna ────────────────────────────────────────────────────────────
     "Real Madrid",
@@ -66,6 +91,13 @@ TEAMS = [
     "Villarreal",
     "Athletic Bilbao",
     "Real Sociedad",
+    "Deportivo La Coruña",
+    "Betis",
+    "Celta Vigo",
+    "Espanyol",
+    "Malaga",
+    "Zaragoza",
+    "Osasuna",
 
     # ── Germania ──────────────────────────────────────────────────────────
     "Bayern Monaco",
@@ -74,7 +106,13 @@ TEAMS = [
     "Schalke 04",
     "Borussia Mönchengladbach",
     "Wolfsburg",
+    "Amburgo",
+    "Stoccarda",
+    "Eintracht Francoforte",
     "Lipsia",
+    "Werder Brema",
+    "Hertha Berlino",
+    "Colonia",
 
     # ── Francia ───────────────────────────────────────────────────────────
     "PSG",
@@ -82,6 +120,8 @@ TEAMS = [
     "Lione",
     "Monaco",
     "Lille",
+    "Bordeaux",
+    "Saint-Étienne",
     "Nantes",
     "Lens",
     "Rennes",
@@ -91,6 +131,7 @@ TEAMS = [
     "Benfica",
     "Porto",
     "Sporting Lisbona",
+    "Braga",
 
     # ── Olanda ────────────────────────────────────────────────────────────
     "Ajax",
@@ -108,6 +149,15 @@ TEAMS = [
     "Spartak Mosca",
     "Lokomotiv Mosca",
 
+    # ── Scozia ────────────────────────────────────────────────────────────
+    "Celtic",
+    "Rangers",
+
+    # ── Grecia ────────────────────────────────────────────────────────────
+    "Olympiacos",
+    "Panathinaikos",
+    "PAOK",
+
     # ── Belgio / Resto Europa ─────────────────────────────────────────────
     "Anderlecht",
     "Club Brugge",
@@ -116,6 +166,7 @@ TEAMS = [
     "Steaua Bucarest",
     "Red Bull Salisburgo",
     "Bruges",
+    "Benfica",
 ]
 
 # Deduplica mantenendo ordine

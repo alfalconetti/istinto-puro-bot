@@ -6,4 +6,4 @@ services:
     env_file:
       - .env
     volumes:
-      - ./data:/app/data
+      - /var/lib/instinto-puro-bot:/app/data
