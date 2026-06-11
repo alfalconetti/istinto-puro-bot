@@ -219,12 +219,24 @@ def group_get_team_list(group_id: int) -> dict:
 
 
 def get_two_random_teams(group_id: int) -> tuple[str, str] | None:
-    pool = list(group_get_team_list(group_id).keys())
+    import random
+    pool = group_get_team_list(group_id)  # {name: league}
     if len(pool) < 2:
         return None
-    import random
-    random.shuffle(pool)
-    return pool[0], pool[1]
+
+    names  = list(pool.keys())
+    team_a = random.choice(names)
+    league_a = pool[team_a]
+
+    # Costruisci pesi per team_b: doppio se stessa league (e league non è None)
+    remaining = [n for n in names if n != team_a]
+    if league_a:
+        weights = [2 if pool[n] == league_a else 1 for n in remaining]
+    else:
+        weights = [1] * len(remaining)
+
+    team_b = random.choices(remaining, weights=weights, k=1)[0]
+    return team_a, team_b
 
 
 def group_list_overrides(group_id: int) -> list[sqlite3.Row]:

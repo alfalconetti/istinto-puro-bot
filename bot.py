@@ -47,8 +47,6 @@ async def safe_delete(context: ContextTypes.DEFAULT_TYPE, chat_id: int, msg_id: 
 
 async def is_group_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     user_id = update.effective_user.id
-    if user_id == ADMIN_ID:
-        return True
     chat_id = update.effective_chat.id
     try:
         member = await context.bot.get_chat_member(chat_id, user_id)
@@ -621,6 +619,7 @@ def main():
 
     app = Application.builder().token(BOT_TOKEN).build()
 
+    app.add_handler(CommandHandler("start",          cmd_start))
     app.add_handler(CommandHandler("newgame",        cmd_newgame))
     app.add_handler(CommandHandler("cancelgame",     cmd_cancelgame))
     app.add_handler(CommandHandler("resumegame",     cmd_resumegame))
@@ -650,3 +649,35 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "👋 Benvenuto in *Istinto Puro*!\n\n"
+        "Il gioco è semplice: vengono sorteggiate due squadre e dovete nominare "
+        "un calciatore che ha giocato in entrambe. Vince chi arriva prima al punteggio stabilito.\n\n"
+        "⚽ *Come si gioca*\n"
+        "1. `/newgame` — avvia una partita e scegli la modalità\n"
+        "2. Due giocatori premono *Unisciti*\n"
+        "3. Prima di ogni mano entrambi premono *Sono pronto*\n"
+        "4. Partono le squadre — i giocatori rispondono in chat\n"
+        "5. A fine mano si vota chi ha risposto correttamente\n"
+        "6. Chi arriva al punteggio stabilito vince la partita\n\n"
+        "🤝 *Arbitraggio a fiducia*\n"
+        "Non esiste una validazione automatica delle risposte — sarebbe impossibile "
+        "gestire varianti di nomi, prestiti e carriere di migliaia di calciatori in modo affidabile. "
+        "I giocatori arbitrano da soli con i bottoni: si assegna il punto a chi ha risposto "
+        "correttamente, o si skippa se nessuno ha risposto bene. Il sistema funziona sulla fiducia.\n\n"
+        "🎲 *Modalità squadre*\n"
+        "• *Automatica* — il bot pesca due squadre, favorendo coppie dello stesso campionato\n"
+        "• *Manuale* — ogni giocatore scrive una squadra (3 secondi per il secondo)\n\n"
+        "📋 *Comandi*\n"
+        "`/newgame [punti]` — nuova partita (default 3 punti)\n"
+        "`/cancelgame` — annulla la partita in corso\n"
+        "`/resumegame` — riprende una partita interrotta\n"
+        "`/stats` — classifica del gruppo per win%\n\n"
+        "🏟 *Squadre*\n"
+        "Gli admin del gruppo possono personalizzare il pool con `/addteam` e `/delteam`.\n\n"
+        "Buon gioco! 🏆",
+        parse_mode="Markdown",
+    )
