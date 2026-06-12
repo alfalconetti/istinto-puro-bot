@@ -55,7 +55,7 @@ I giocatori arbitrano da soli tramite bottoni inline: assegnano il punto a chi h
 ### Installazione
 
 ```bash
-git clone https://github.com/<tuo-user>/istinto-puro-bot
+git clone https://github.com/alfalconetti/istinto-puro-bot
 cd istinto-puro-bot
 
 cp .env.example .env
