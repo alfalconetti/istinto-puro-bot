@@ -466,7 +466,7 @@ async def cmd_adminlistteams(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def cmd_adminstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
-    if not is_private_chat(update):
+    if update.effective_chat.type != "private":
         await update.message.reply_text("Usa /adminstats in chat privata.")
         return
 
