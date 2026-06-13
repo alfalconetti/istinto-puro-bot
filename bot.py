@@ -47,6 +47,8 @@ async def safe_delete(context: ContextTypes.DEFAULT_TYPE, chat_id: int, msg_id: 
 
 async def is_group_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     user_id = update.effective_user.id
+    if user_id == ADMIN_ID:
+        return True
     chat_id = update.effective_chat.id
     try:
         member = await context.bot.get_chat_member(chat_id, user_id)
@@ -396,8 +398,6 @@ async def cmd_delteam(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_listteams(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_group_admin(update, context):
-        return
     chat_id  = update.effective_chat.id
     pool     = db.group_get_team_list(chat_id)
     overrides = db.group_list_overrides(chat_id)
@@ -460,6 +460,45 @@ async def cmd_adminlistteams(update: Update, context: ContextTypes.DEFAULT_TYPE)
     text = "🏟 *Squadre globali:*\n\n"
     for league, names in sorted(by_league.items()):
         text += f"*{league}*\n" + "\n".join(f"• {n}" for n in names) + "\n\n"
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+
+async def cmd_adminstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    if not is_private_chat(update):
+        await update.message.reply_text("Usa /adminstats in chat privata.")
+        return
+
+    with db.get_conn() as conn:
+        totali = conn.execute("""
+            SELECT
+              COUNT(DISTINCT group_id) as gruppi,
+              COUNT(*) as partite_totali,
+              COUNT(CASE WHEN state = 'GAME_OVER' THEN 1 END) as finite,
+              COUNT(CASE WHEN state = 'CANCELLED' THEN 1 END) as annullate,
+              COUNT(CASE WHEN state NOT IN ('GAME_OVER','CANCELLED') THEN 1 END) as in_corso
+            FROM games
+        """).fetchone()
+
+        per_gruppo = conn.execute("""
+            SELECT group_id, COUNT(*) as partite
+            FROM games WHERE state = 'GAME_OVER'
+            GROUP BY group_id ORDER BY partite DESC
+        """).fetchall()
+
+    text = (
+        f"📊 *Statistiche Istinto Puro*\n\n"
+        f"Gruppi attivi: *{totali['gruppi']}*\n"
+        f"Partite totali: *{totali['partite_totali']}*\n"
+        f"  ✅ Finite: {totali['finite']}\n"
+        f"  ❌ Annullate: {totali['annullate']}\n"
+        f"  ⏳ In corso: {totali['in_corso']}\n\n"
+        f"*Per gruppo:*\n"
+    )
+    for r in per_gruppo:
+        text += f"  `{r['group_id']}`: {r['partite']} partite\n"
+
     await update.message.reply_text(text, parse_mode="Markdown")
 
 
@@ -638,8 +677,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📋 *Comandi*\n"
         "`/newgame [punti]` — nuova partita (default 3 punti)\n"
         "`/cancelgame` — annulla la partita in corso\n"
-        "`/resumegame` — riprende una partita interrotta\n"
-        "`/stats` — classifica del gruppo per win%\n\n"
+        "`/resumegame` — riprende una partita interrotta (es. dopo un riavvio del bot)\n"
+        "`/stats` — classifica del gruppo per win%\n"
+        "`/listteams` — squadre attive per questo gruppo\n\n"
         "🏟 *Squadre*\n"
         "Gli admin del gruppo possono personalizzare il pool con `/addteam` e `/delteam`.\n\n"
         "Buon gioco! 🏆",
@@ -666,6 +706,7 @@ def main():
     app.add_handler(CommandHandler("adminaddteam",   cmd_adminaddteam))
     app.add_handler(CommandHandler("admindelteam",   cmd_admindelteam))
     app.add_handler(CommandHandler("adminlistteams", cmd_adminlistteams))
+    app.add_handler(CommandHandler("adminstats",     cmd_adminstats))
 
     app.add_handler(CallbackQueryHandler(cb_addteam_league, pattern="^addteam_league_"))
     app.add_handler(CallbackQueryHandler(cb_mode,  pattern="^mode_"))
