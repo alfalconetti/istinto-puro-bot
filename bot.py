@@ -334,6 +334,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_addteam(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_group_admin(update, context):
+        await update.message.reply_text("⛔ Solo gli admin del gruppo possono usare questo comando.")
         return
     if not context.args:
         await update.message.reply_text("Uso: /addteam <nome squadra>")
@@ -385,6 +386,7 @@ async def cb_addteam_league(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_delteam(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_group_admin(update, context):
+        await update.message.reply_text("⛔ Solo gli admin del gruppo possono usare questo comando.")
         return
     if not context.args:
         await update.message.reply_text("Uso: /delteam <nome squadra>")
@@ -398,16 +400,25 @@ async def cmd_delteam(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_listteams(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id  = update.effective_chat.id
-    pool     = db.group_get_team_list(chat_id)
+    chat_id   = update.effective_chat.id
+    pool      = db.group_get_team_list(chat_id)
     overrides = db.group_list_overrides(chat_id)
 
-    text = f"🏟 *Squadre attive per questo gruppo:* {len(pool)}\n"
+    by_league: dict[str, list[str]] = {}
+    for name, league in pool.items():
+        league = league or "—"
+        by_league.setdefault(league, []).append(name)
+
+    text = f"🏟 *Squadre attive per questo gruppo:* {len(pool)}\n\n"
+    for league, names in sorted(by_league.items()):
+        text += f"*{league}*\n" + "\n".join(f"• {n}" for n in sorted(names)) + "\n\n"
+
     if overrides:
-        text += "\n*Modifiche rispetto al globale:*\n"
+        text += "*Modifiche rispetto al globale:*\n"
         for r in overrides:
             icon = "➕" if r["action"] == "add" else "🚫"
             text += f"{icon} {r['team_name']}\n"
+
     await update.message.reply_text(text, parse_mode="Markdown")
 
 
@@ -466,7 +477,7 @@ async def cmd_adminlistteams(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def cmd_adminstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
-    if update.effective_chat.type != "private":
+    if not is_private_chat(update):
         await update.message.reply_text("Usa /adminstats in chat privata.")
         return
 
